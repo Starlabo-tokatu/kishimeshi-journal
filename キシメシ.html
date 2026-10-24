@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>キシメシ 勤怠・運営サポートアプリ</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- 超高速データベース Firebase の読み込み -->
+  <script src="https://www.gstatic.com/firebasejs/10.5.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.5.0/firebase-firestore-compat.js"></script>
+  
+  <style>
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // =========================================================================
+    // apiKey: "AIzaSyBySHD8nYfcDzYkjyTtbhyOTufHjDc9jqA", authDomain: "kishimeshi-journal.firebaseapp.com", projectId: "kishimeshi-journal", storageBucket: "kishimeshi-journal.firebasestorage.app", messagingSenderId: "739001865635", appId: "1:739001865635:web:d118b572751a6606cf7616"
+    // Firebaseの画面で表示された firebaseConfig を以下に上書き貼り付けしてください
+    // =========================================================================
+    const firebaseConfig = {
+      apiKey: "AIzaSyXXXXXXXXXXXXXXX",
+      authDomain: "kishimeshi-xxxx.firebaseapp.com",
+      projectId: "kishimeshi-xxxx",
+      storageBucket: "kishimeshi-xxxx.appspot.com",
+      messagingSenderId: "1234567890",
+      appId: "1:1234567890:web:abcdefg"
+    };
+
+    // Firebaseの初期化
+    if (!firebase.apps.length) {
+      firebase.initializeApp(firebaseConfig);
+    }
+    const db = firebase.firestore();
+
+    const TODAY = new Date(2026, 9, 24); // モック基準日
+    const formatDate = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+    // --- 初期データ構造 ---
+    const INITIAL_DATA = {
+      staffList: [
+        { id: 1, name: '社員 太郎', role: '社員', email: 'taro@example.com' },
+        { id: 2, name: 'バイト 花子', role: 'アルバイト', email: 'hanako@example.com' }
+      ],
+      announcements: [{ id: 1, text: '来月より冬メニュー開始です', date: '2026-10-20' }],
+      globalEvents: { '2026-10-25': '全体清掃' },
+      shifts: { '2026-10-24': { 1: '出勤', 2: '休み' } },
+      shiftConfirmed: { '2026-10-24': true },
+      shiftRequests: { '2026-10-26': { 2: { requestOff: true, comment: '午後のみ' } } },
+      attendance: {},
+      payments: {},
+      attendanceConfirmed: {},
+      budget: [{ id: 1, date: '2026-10-10', name: '売上', type: 'income', amount: 30000 }]
+    };
+
+    function App() {
+      const [view, setView] = useState('select');
+      const [currentUser, setCurrentUser] = useState(null);
+      const [appData, setAppData] = useState(null);
+
+      // Firebaseとのリアルタイム同期
+      useEffect(() => {
+        const docRef = db.collection("kishimeshi_app").doc("main_data");
+        const unsubscribe = docRef.onSnapshot((doc) => {
+          if (doc.exists) {
+            setAppData(doc.data());
+          } else {
+            docRef.set(INITIAL_DATA);
+            setAppData(INITIAL_DATA);
+          }
+        });
+        return () => unsubscribe();
+      }, []);
+
+      // DB更新用関数
+      const updateDB = (key, value) => {
+        if (!appData) return;
+        db.collection("kishimeshi_app").doc("main_data").update({
+          [key]: typeof value === 'function' ? value(appData[key]) : value
+        });
+      };
+
+      if (!appData) {
+        return <div className="min-h-screen flex items-center justify-center font-bold text-orange-600">データベースに接続中...</div>;
+      }
+
+      if (view === 'select') {
+        return (
+          <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 p-4">
+            <h1 className="text-3xl font-bold text-orange-600 mb-8">キシメシ サポート</h1>
+            <div className="space-y-4 w-full max-w-sm">
+              <button onClick={() => setView('admin')} className="w-full bg-gray-800 text-white p-4 rounded-lg font-bold shadow hover:bg-gray-700">管理者画面を開く (PC用)</button>
+              <div className="border-t pt-4">
+                <p className="text-sm text-gray-500 mb-2">利用者ログイン (スマホ用):</p>
+                {appData.staffList.map(s => (
+                  <button key={s.id} onClick={() => { setCurrentUser(s); setView('user'); }} className="w-full mb-2 bg-orange-500 text-white p-4 rounded-lg font-bold shadow hover:bg-orange-600">{s.name} ({s.role})</button>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      const commonProps = { appData, updateDB };
+      if (view === 'user') return <UserApp user={currentUser} onExit={() => setView('select')} {...commonProps} />;
+      if (view === 'admin') return <AdminApp onExit={() => setView('select')} {...commonProps} />;
+    }
+
+    function getMonthDays(year, month) {
+      const date = new Date(year, month - 1, 1);
+      const days = [];
+      for (let i = 0; i < date.getDay(); i++) days.push(null);
+      for (let i = 1; i <= new Date(year, month, 0).getDate(); i++) days.push(i);
+      return days;
+    }
+
+    // ==========================================
+    //  利用者向け画面 (スマホ)
+    // ==========================================
+    function UserApp({ user, onExit, appData, updateDB }) {
+      const [tab, setTab] = useState('home');
+      return (
+        <div className="flex flex-col h-screen bg-gray-100 max-w-md mx-auto border shadow-xl relative">
+          <header className="bg-orange-600 text-white p-4 flex justify-between items-center shrink-0">
+            <h1 className="font-bold text-lg">キシメシ - {user.name}</h1>
+            <button onClick={onExit} className="text-sm underline">ログアウト</button>
+          </header>
+          <main className="flex-1 overflow-y-auto p-4 pb-20">
+            {tab === 'home' && <UserHome appData={appData} />}
+            {tab === 'shift' && <UserShift user={user} appData={appData} updateDB={updateDB} />}
+            {tab === 'records' && <UserRecords user={user} appData={appData} />}
+          </main>
+          <nav className="absolute bottom-0 w-full bg-white border-t flex justify-around p-3 text-xs text-gray-600">
+            <button onClick={() => setTab('home')} className={`flex flex-col items-center ${tab==='home'?'text-orange-600 font-bold':''}`}><span className="text-xl">🏠</span>ホーム</button>
+            <button onClick={() => setTab('shift')} className={`flex flex-col items-center ${tab==='shift'?'text-orange-600 font-bold':''}`}><span className="text-xl">⏱</span>シフト</button>
+            <button onClick={() => setTab('records')} className={`flex flex-col items-center ${tab==='records'?'text-orange-600 font-bold':''}`}><span className="text-xl">📜</span>実績</button>
+          </nav>
+        </div>
+      );
+    }
+
+    function UserHome({ appData }) {
+      const [dateKey, setDateKey] = useState(formatDate(TODAY.getFullYear(), TODAY.getMonth()+1, TODAY.getDate()));
+      const displayStaff = appData.staffList.filter(s => s.role === '社員' || appData.shifts[dateKey]?.[s.id] === '出勤');
+
+      return (
+        <div className="space-y-6">
+          <section className="bg-white p-4 rounded-lg shadow-sm">
+            <h2 className="font-bold text-gray-700 border-b pb-2 mb-2">📢 お知らせ</h2>
+            <ul className="space-y-2 text-sm">{appData.announcements.map(a => <li key={a.id}>[{a.date}] {a.text}</li>)}</ul>
+          </section>
+          <section className="bg-white p-4 rounded-lg shadow-sm">
+            <h2 className="font-bold text-gray-700 border-b pb-2 mb-2">👥 出勤メンバー確認</h2>
+            <div className="mb-4">
+              <input type="date" value={dateKey} onChange={e=>setDateKey(e.target.value)} className="border rounded p-2 text-sm w-full" />
+            </div>
+            <ul className="space-y-2 text-sm">
+              {displayStaff.map(s => (
+                <li key={s.id} className="flex justify-between items-center border-b pb-1">
+                  <span>{s.name} <span className="text-xs text-gray-500">({s.role})</span></span>
+                  <span className="text-orange-600 font-bold">{appData.shifts[dateKey]?.[s.id] === '出勤' ? '出勤' : (s.role==='社員'?'休み':'')}</span>
+                </li>
+              ))}
+              {displayStaff.length === 0 && <p className="text-gray-400">予定メンバーがいません</p>}
+            </ul>
+          </section>
+        </div>
+      );
+    }
+
+    function UserShift({ user, appData, updateDB }) {
+      const [year, setYear] = useState(TODAY.getFullYear());
+      const [month, setMonth] = useState(TODAY.getMonth() + 1);
+      const [modalDate, setModalDate] = useState(null);
+
+      const days = getMonthDays(year, month);
+      const handleRequestOff = (e) => updateDB('shiftRequests', prev => ({...prev, [modalDate]: {...(prev[modalDate]||{}), [user.id]: {...prev[modalDate]?.[user.id], requestOff: e.target.checked}}}));
+      const handleComment = (e) => updateDB('shiftRequests', prev => ({...prev, [modalDate]: {...(prev[modalDate]||{}), [user.id]: {...prev[modalDate]?.[user.id], comment: e.target.value}}}));
+
+      return (
+        <div>
+          <div className="flex justify-between items-center mb-4">
+            <button onClick={() => { if(month===1){setYear(year-1);setMonth(12);} else setMonth(month-1); }} className="px-3 py-1 bg-gray-200 rounded">◀</button>
+            <h2 className="font-bold text-lg">{year}年 {month}月</h2>
+            <button onClick={() => { if(month===12){setYear(year+1);setMonth(1);} else setMonth(month+1); }} className="px-3 py-1 bg-gray-200 rounded">▶</button>
+          </div>
+          <div className="grid grid-cols-7 gap-1 text-center text-sm mb-4">
+            {['日','月','火','水','木','金','土'].map(d=><div key={d} className="font-bold text-gray-500">{d}</div>)}
+            {days.map((d, i) => {
+              if (!d) return <div key={`empty-${i}`}></div>;
+              const dateKey = formatDate(year, month, d);
+              const isToday = dateKey === formatDate(TODAY.getFullYear(), TODAY.getMonth()+1, TODAY.getDate());
+              const req = appData.shiftRequests[dateKey]?.[user.id] || {};
+              const confirmed = appData.shiftConfirmed[dateKey];
+              const status = appData.shifts[dateKey]?.[user.id];
+              const hasGlobal = !!appData.globalEvents[dateKey];
+              
+              let cellClass = "h-16 border rounded flex flex-col items-center justify-start py-1 cursor-pointer relative ";
+              if (isToday) cellClass += "border-blue-500 bg-blue-50 ring-1 ring-blue-500 ";
+              else if (confirmed && status === '休み') cellClass += "bg-purple-200 ";
+              else cellClass += "bg-white hover:bg-gray-50 ";
+
+              return (
+                <div key={d} onClick={() => setModalDate(dateKey)} className={cellClass}>
+                  <span className={isToday ? 'font-bold text-blue-600' : ''}>{d}</span>
+                  <div className="flex flex-wrap justify-center gap-1 mt-1">
+                    {req.requestOff && <span className="w-2 h-2 rounded-full bg-green-500"></span>}
+                    {(confirmed && status === '出勤') && <span className="w-2 h-2 rounded-full bg-purple-500"></span>}
+                    {req.comment && <span className="w-2 h-2 rounded-full bg-orange-500"></span>}
+                    {hasGlobal && <span className="w-2 h-2 rounded-full bg-red-500"></span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="bg-white p-3 rounded text-xs text-gray-600 space-y-1 shadow-sm mb-4">
+            <p><span className="inline-block w-3 h-3 bg-purple-200 mr-1 border border-purple-300"></span>背景紫: 確定休</p>
+            <p><span className="inline-block w-2 h-2 rounded-full bg-purple-500 mr-1"></span>紫ドット: 確定出勤</p>
+            <p><span className="inline-block w-2 h-2 rounded-full bg-green-500 mr-1"></span>緑: 希望休 / <span className="inline-block w-2 h-2 rounded-full bg-orange-500 mr-1 ml-1"></span>橙: コメント / <span className="inline-block w-2 h-2 rounded-full bg-red-500 mr-1 ml-1"></span>赤: 全体予定</p>
+          </div>
+          {modalDate && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+              <div className="bg-white p-6 rounded-lg w-full max-w-xs space-y-4">
+                <h3 className="font-bold text-lg">{modalDate} 希望入力</h3>
+                <div className="bg-gray-50 p-3 rounded border text-sm space-y-2">
+                  <p><span className="font-bold text-gray-600">確定状況:</span> {appData.shiftConfirmed[modalDate] ? (appData.shifts[modalDate]?.[user.id] || '未定') : '未確定'}</p>
+                  <p><span className="font-bold text-gray-600">現在のコメント:</span> {appData.shiftRequests[modalDate]?.[user.id]?.comment || 'なし'}</p>
+                </div>
+                <label className="flex items-center space-x-2"><input type="checkbox" checked={appData.shiftRequests[modalDate]?.[user.id]?.requestOff || false} onChange={handleRequestOff} className="w-5 h-5 text-orange-600 rounded" /><span>休み希望にする</span></label>
+                <div>
+                  <label className="block text-sm mb-1">コメント</label>
+                  <input type="text" value={appData.shiftRequests[modalDate]?.[user.id]?.comment || ''} onChange={handleComment} className="w-full border rounded p-2 text-sm" placeholder="午後のみ可能など" />
+                </div>
+                <div className="flex justify-end pt-2"><button onClick={() => setModalDate(null)} className="px-4 py-2 bg-orange-600 text-white rounded text-sm font-bold">閉じる</button></div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function UserRecords({ user, appData }) {
+      const [year, setYear] = useState(TODAY.getFullYear());
+      const [month, setMonth] = useState(TODAY.getMonth() + 1);
+      const days = getMonthDays(year, month);
+      return (
+        <div className="bg-white rounded-lg shadow-sm p-4">
+          <div className="flex justify-between items-center border-b pb-2 mb-4">
+            <button onClick={()=>{setMonth(m=>m===1?12:m-1); if(month===1)setYear(y=>y-1)}} className="px-2 py-1 bg-gray-100">◀</button>
+            <h2 className="font-bold text-gray-700">{year}年{month}月 出勤実績</h2>
+            <button onClick={()=>{setMonth(m=>m===12?1:m+1); if(month===12)setYear(y=>y+1)}} className="px-2 py-1 bg-gray-100">▶</button>
+          </div>
+          <table className="w-full text-sm text-left"><thead className="text-gray-500 border-b"><tr><th className="pb-2">日付</th><th className="pb-2">状況</th><th className="pb-2 text-right">支給額</th></tr></thead>
+            <tbody>
+              {days.filter(d=>d).map(d => {
+                const dateKey = formatDate(year, month, d);
+                const status = appData.attendance[dateKey]?.[user.id]; 
+                const pay = appData.payments[dateKey]?.[user.id] || 0;
+                if (!status && pay === 0) return null;
+                return <tr key={d} className="border-b last:border-0"><td className="py-3">{d}日</td><td className="py-3">{status === '済' ? <span className="text-green-600 font-bold">済</span> : <span className="text-gray-400">未</span>}</td><td className="py-3 text-right">¥{pay.toLocaleString()}</td></tr>
+              })}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    // ==========================================
+    //  管理者向け画面 (PC)
+    // ==========================================
+    function AdminApp({ onExit, appData, updateDB }) {
+      const [tab, setTab] = useState('budget');
+      return (
+        <div className="flex h-screen bg-gray-100">
+          <aside className="w-64 bg-gray-900 text-white flex flex-col shrink-0">
+            <div className="p-6 text-xl font-bold text-orange-500">キシメシ 管理者</div>
+            <nav className="flex-1 px-4 space-y-2">
+              <button onClick={()=>setTab('shift')} className={`w-full text-left p-3 rounded ${tab==='shift'?'bg-gray-800':'hover:bg-gray-800 text-gray-400'}`}>📋 シフト管理</button>
+              <button onClick={()=>setTab('staff')} className={`w-full text-left p-3 rounded ${tab==='staff'?'bg-gray-800':'hover:bg-gray-800 text-gray-400'}`}>👤 従業員登録</button>
+              <button onClick={()=>setTab('budget')} className={`w-full text-left p-3 rounded ${tab==='budget'?'bg-gray-800':'hover:bg-gray-800 text-gray-400'}`}>💲 収支・実績登録</button>
+            </nav>
+            <div className="p-4 border-t border-gray-800"><button onClick={onExit} className="w-full bg-gray-700 p-2 rounded text-sm hover:bg-gray-600">◀ 画面選択へ戻る</button></div>
+          </aside>
+          <main className="flex-1 overflow-y-auto p-8">
+            {tab === 'shift' && <AdminShift appData={appData} updateDB={updateDB} />}
+            {tab === 'staff' && <AdminStaff appData={appData} updateDB={updateDB} />}
+            {tab === 'budget' && <AdminBudget appData={appData} updateDB={updateDB} />}
+          </main>
+        </div>
+      );
+    }
+
+    function AdminShift({ appData, updateDB }) {
+      const [dateKey, setDateKey] = useState(formatDate(TODAY.getFullYear(), TODAY.getMonth()+1, TODAY.getDate()));
+      const [newAnnounce, setNewAnnounce] = useState('');
+      const isConfirmed = appData.shiftConfirmed[dateKey];
+
+      return (
+        <div className="space-y-6 max-w-4xl">
+          <h2 className="text-2xl font-bold">シフト管理・メッセージ配信</h2>
+          <div className="bg-white p-6 rounded-lg shadow-sm border-t-4 border-orange-500">
+            <div className="flex justify-between items-center mb-6">
+              <div className="flex items-center space-x-4">
+                <h3 className="font-bold">対象日:</h3>
+                <input type="date" value={dateKey} onChange={e=>setDateKey(e.target.value)} className="border p-2 rounded text-lg" />
+                {isConfirmed && <span className="text-green-600 font-bold ml-2">✓ 決定済み</span>}
+              </div>
+              <button onClick={() => updateDB('shiftConfirmed', prev => ({...prev, [dateKey]: !prev[dateKey]}))} className={`px-6 py-2 rounded font-bold text-white shadow ${isConfirmed ? 'bg-gray-500' : 'bg-orange-600'}`}>
+                {isConfirmed ? 'シフト決定を解除' : 'この日のシフトを決定する'}
+              </button>
+            </div>
+            <div className="mb-6 flex space-x-2">
+              <input type="text" value={appData.globalEvents[dateKey]||''} onChange={e=>updateDB('globalEvents', p=>({...p, [dateKey]: e.target.value}))} placeholder="全体の予定 (例: 棚卸し)" className="border p-2 rounded flex-1" />
+            </div>
+            <table className="w-full text-left border-collapse"><thead className="bg-gray-50 border-b"><tr><th className="p-3">スタッフ</th><th className="p-3">希望・コメント</th><th className="p-3 w-32">シフト判定</th></tr></thead>
+              <tbody>
+                {appData.staffList.map(s => {
+                  const req = appData.shiftRequests[dateKey]?.[s.id] || {}; 
+                  const isWork = appData.shifts[dateKey]?.[s.id] === '出勤';
+                  return (
+                    <tr key={s.id} className="border-b"><td className="p-3">{s.name} ({s.role})</td><td className="p-3 text-sm">{req.requestOff && <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs mr-2">休希望</span>}<span className="text-gray-600">{req.comment}</span></td><td className="p-3"><button onClick={()=>updateDB('shifts', prev => ({...prev, [dateKey]: {...(prev[dateKey]||{}), [s.id]: prev[dateKey]?.[s.id] === '出勤' ? '休み' : '出勤'}}))} className={`px-4 py-1 rounded font-bold text-sm w-full ${isWork ? 'bg-purple-600 text-white' : 'bg-gray-200 text-gray-600'}`}>{isWork ? '出勤' : '休み'}</button></td></tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="bg-white p-6 rounded-lg shadow-sm">
+            <h3 className="font-bold mb-4">全体メッセージ配信・管理</h3>
+            <div className="flex space-x-2 mb-4">
+              <input type="text" value={newAnnounce} onChange={e=>setNewAnnounce(e.target.value)} placeholder="新しいお知らせ内容" className="border p-2 rounded flex-1" />
+              <button onClick={()=>{ if(newAnnounce){updateDB('announcements', prev => [{id: Date.now(), text:newAnnounce, date:dateKey}, ...prev]); setNewAnnounce('');}}} className="bg-orange-600 text-white px-6 rounded">配信</button>
+            </div>
+            <ul className="space-y-2 border-t pt-4">
+              {appData.announcements.map(a => (
+                <li key={a.id} className="flex justify-between items-center p-2 hover:bg-gray-50 rounded">
+                  <span>[{a.date}] {a.text}</span>
+                  <button onClick={() => updateDB('announcements', prev => prev.filter(item => item.id !== a.id))} className="text-red-500 text-sm">削除</button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      );
+    }
+
+    function AdminStaff({ appData, updateDB }) {
+      const [form, setForm] = useState({ name: '', email: '', role: 'アルバイト', password: '' });
+      return (
+        <div className="max-w-4xl space-y-6">
+          <h2 className="text-2xl font-bold">従業員登録・管理</h2>
+          <div className="bg-white p-6 rounded-lg shadow-sm">
+            <h3 className="font-bold border-b pb-2 mb-4">新規追加</h3>
+            <div className="grid grid-cols-2 gap-4 mb-4"><input type="text" placeholder="氏名" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} className="border p-2 rounded" /><input type="email" placeholder="メールアドレス" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} className="border p-2 rounded" /><select value={form.role} onChange={e=>setForm({...form,role:e.target.value})} className="border p-2 rounded"><option value="社員">社員</option><option value="アルバイト">アルバイト</option></select></div>
+            <button onClick={()=>{if(form.name){updateDB('staffList', prev => [...prev, {id: Date.now(), ...form}]); setForm({name:'',email:'',role:'アルバイト',password:''});}}} className="bg-gray-800 text-white px-6 py-2 rounded">登録する</button>
+          </div>
+          <div className="bg-white p-6 rounded-lg shadow-sm">
+            <h3 className="font-bold border-b pb-2 mb-4">登録スタッフ一覧</h3>
+            <table className="w-full text-left">
+              <thead className="text-gray-500 border-b"><tr><th className="pb-2">氏名</th><th className="pb-2">区分</th><th className="pb-2 text-right">操作</th></tr></thead>
+              <tbody>
+                {appData.staffList.map(s => (
+                  <tr key={s.id} className="border-b last:border-0 hover:bg-gray-50">
+                    <td className="py-3">{s.name}</td><td className="py-3">{s.role}</td>
+                    <td className="py-3 text-right"><button onClick={() => updateDB('staffList', prev => prev.filter(st => st.id !== s.id))} className="text-red-500 text-sm">削除</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    function AdminBudget({ appData, updateDB }) {
+      const [year, setYear] = useState(TODAY.getFullYear());
+      const [month, setMonth] = useState(TODAY.getMonth() + 1);
+      const [dateKey, setDateKey] = useState(formatDate(TODAY.getFullYear(), TODAY.getMonth()+1, TODAY.getDate()));
+
+      const workingStaff = appData.staffList.filter(s => appData.shifts[dateKey]?.[s.id] === '出勤');
+      const isRecordConfirmed = appData.attendanceConfirmed[dateKey];
+
+      const days = getMonthDays(year, month);
+      const unconfirmedPastDays = days.filter(d => {
+        if (!d) return false;
+        const dDate = new Date(year, month-1, d);
+        if (dDate >= TODAY) return false; 
+        return !appData.attendanceConfirmed[formatDate(year, month, d)];
+      });
+
+      const totalIncome = appData.budget.filter(b => b.type === 'income').reduce((sum, b) => sum + Number(b.amount || 0), 0);
+      const totalExpense = appData.budget.filter(b => b.type === 'expense').reduce((sum, b) => sum + Number(b.amount || 0), 0);
+
+      return (
+        <div className="max-w-6xl space-y-8 pb-10">
+          <div className="flex justify-between items-center">
+            <h2 className="text-2xl font-bold">予算・実績管理</h2>
+          </div>
+          <div className="bg-white p-6 rounded-lg shadow-sm border-t-4 border-blue-500">
+            <h3 className="font-bold mb-4">日次実績・支給額 登録 (スタッフ)</h3>
+            
+            <div className="flex items-center space-x-2 mb-4 bg-gray-50 p-2 rounded w-fit">
+              <span className="text-sm">アラート確認月:</span>
+              <button onClick={()=>{setMonth(m=>m===1?12:m-1); if(month===1)setYear(y=>y-1)}} className="px-2 py-1 bg-gray-200 text-xs rounded">◀</button>
+              <span className="text-sm font-bold">{year}年{month}月</span>
+              <button onClick={()=>{setMonth(m=>m===12?1:m+1); if(month===12)setYear(y=>y+1)}} className="px-2 py-1 bg-gray-200 text-xs rounded">▶</button>
+            </div>
+
+            {unconfirmedPastDays.length > 0 && (
+              <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative text-sm">
+                <strong className="font-bold">未登録アラート:</strong> 過去で実績が未確定の日があります。（{unconfirmedPastDays.map(d=>`${d}日`).join(', ')}）
+              </div>
+            )}
+
+            <div className="flex items-center justify-between mb-4 mt-6">
+              <div className="flex items-center space-x-4">
+                <span className="text-sm font-bold text-gray-600">登録対象日:</span>
+                <input type="date" value={dateKey} onChange={e=>setDateKey(e.target.value)} className="border p-2 rounded text-lg" />
+                {isRecordConfirmed && <span className="text-green-600 font-bold ml-2">✓ 決定済み</span>}
+              </div>
+              <button onClick={() => {
+                if (new Date(dateKey) >= TODAY && !window.confirm("今日または未来の日付です。実績を確定させてもよろしいですか？")) return;
+                updateDB('attendanceConfirmed', prev => ({...prev, [dateKey]: !prev[dateKey]}));
+              }} className={`px-6 py-2 rounded font-bold text-white shadow ${isRecordConfirmed ? 'bg-gray-500' : 'bg-blue-600'}`}>
+                {isRecordConfirmed ? '実績決定を解除' : 'この日の実績を決定する'}
+              </button>
+            </div>
+            
+            {workingStaff.length > 0 ? (
+              <table className="w-full text-left"><thead className="bg-gray-50 border-b"><tr><th className="p-3 w-1/3">出勤スタッフ</th><th className="p-3 w-1/3">出退勤ステータス</th><th className="p-3 w-1/3">支給額 (円)</th></tr></thead>
+                <tbody>
+                  {workingStaff.map(s => {
+                    const st = appData.attendance[dateKey]?.[s.id] || '未'; 
+                    const pay = appData.payments[dateKey]?.[s.id] || '';
+                    return (
+                      <tr key={s.id} className="border-b">
+                        <td className="p-3">{s.name} <span className="text-xs text-gray-500">({s.role})</span></td>
+                        <td className="p-3"><button onClick={()=>updateDB('attendance', p=>({...p, [dateKey]:{...(p[dateKey]||{}), [s.id]: st==='未'?'済':'未'}}))} className={`px-5 py-1 rounded text-sm font-bold ${st==='済'?'bg-green-100 text-green-700 border-green-300':'bg-gray-100 text-gray-500 border-gray-300'}`}>{st}</button></td>
+                        <td className="p-3"><div className="flex items-center">¥ <input type="number" value={pay} onChange={e=>updateDB('payments', p=>({...p, [dateKey]:{...(p[dateKey]||{}), [s.id]: Number(e.target.value)}}))} className="border p-2 rounded ml-2 w-32 text-right" placeholder="0" /></div></td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            ) : <p className="text-gray-500 p-4 text-center bg-gray-50 rounded">この日の出勤者はいません。</p>}
+          </div>
+
+          <div className="bg-white p-6 rounded-lg shadow-sm">
+            <div className="flex justify-between items-center mb-4"><h3 className="font-bold">全体の収支明細</h3><button onClick={() => updateDB('budget', prev => [...prev, {id:Date.now(), date:dateKey, name:'', type:'expense', amount:0}])} className="bg-gray-800 text-white px-3 py-1 rounded text-sm">+ 行を追加</button></div>
+            <table className="w-full text-left">
+              <thead className="bg-gray-50 border-b"><tr><th className="p-2 w-32">日付</th><th className="p-2">名目</th><th className="p-2 w-32">収支区分</th><th className="p-2 w-48 text-right">金額 (円)</th><th className="p-2 w-16"></th></tr></thead>
+              <tbody>
+                {appData.budget.map(b => (
+                  <tr key={b.id} className="border-b hover:bg-gray-50">
+                    <td className="p-1"><input type="date" value={b.date} onChange={e=>updateDB('budget', prev => prev.map(item => item.id===b.id ? {...item, date: e.target.value} : item))} className="w-full p-2 outline-none bg-transparent text-sm" /></td>
+                    <td className="p-1"><input type="text" value={b.name} onChange={e=>updateDB('budget', prev => prev.map(item => item.id===b.id ? {...item, name: e.target.value} : item))} className="w-full p-2 outline-none bg-transparent" placeholder="項目名" /></td>
+                    <td className="p-1"><select value={b.type} onChange={e=>updateDB('budget', prev => prev.map(item => item.id===b.id ? {...item, type: e.target.value} : item))} className="w-full p-2 outline-none bg-transparent"><option value="income">収入</option><option value="expense">支出</option></select></td>
+                    <td className="p-1 flex items-center justify-end">¥<input type="number" value={b.amount} onChange={e=>updateDB('budget', prev => prev.map(item => item.id===b.id ? {...item, amount: e.target.value} : item))} className="w-full p-2 outline-none bg-transparent text-right" /></td>
+                    <td className="p-1 text-center"><button onClick={() => updateDB('budget', prev => prev.filter(item => item.id !== b.id))} className="text-red-500 hover:bg-red-50 p-1 rounded">✖</button></td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="bg-blue-50 font-bold border-t-2 border-blue-200">
+                  <td colSpan="3" className="p-3 text-right">合計収支 (収入 - 支出) :</td>
+                  <td className="p-3 text-right text-lg text-blue-700">¥{(totalIncome - totalExpense).toLocaleString()}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
